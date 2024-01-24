@@ -13,6 +13,8 @@
 #                                                        #
 # This owes heavily to the RNS Resource example, and is  #
 # licensed under a similar MIT licence.                  #
+#                                                        #
+# This code has not been cleaned or refactored. Sorry    #
 ##########################################################
 
 import os
@@ -62,15 +64,21 @@ last_action_time = None
 last_announce_time = None
 
 config = None
-  
+
+# configparser based configuration container. Deviates
+# from usual Reticulum config parsing just because
+# I was familiar with configparser and wanted speed.
 class ConfigContainer:
   def __init__(self,path):
     
+    # Load or create as required
     if os.path.isfile(path):
       self.Load(path)
     else:
       self.Create(path)
       
+  # Loads a configuration file, then populates an object
+  # to prevent repeated string lookups
   def Load(self, path):
     C = configparser.ConfigParser()
     C.read(path)
@@ -86,6 +94,7 @@ class ConfigContainer:
     self.ANNOUNCE_RATE = int(C['MAILBOX']['ANNOUNCE_RATE'])
     self.PATH = C['PATHS']['MAIN']
     
+  # Creates a default configuration file, then loads it.
   def Create(self, path):
     C = configparser.ConfigParser()
     C['MAILBOX'] = {}
@@ -106,14 +115,17 @@ class ConfigContainer:
 # to run as a server
 def server(configpath,path):
   global configdir, lxmf_destination, lxm_router, serve_path, config, MB
+  
+  # Define config path, might want to migrate to file
   if path == None:
     path = os.path.expanduser("~")+"/.popr"
   config = ConfigContainer(path+"/config")
   reticulum = RNS.Reticulum(configpath)
+  # Load path from configuration
   configdir = config.PATH
   identitypath = configdir+"/storage/identity"
-  os.makedirs(configdir+"/storage/messages",exist_ok=True)
-  os.makedirs(configdir+"/lxmrouter",exist_ok=True)
+  os.makedirs(configdir+"/storage/messages",exist_ok=True) # Fails gracefully
+  os.makedirs(configdir+"/lxmrouter",exist_ok=True) # can be used as a failsafe
   if os.path.exists(identitypath):
     server_identity = RNS.Identity.from_file(identitypath)
     print("Loading identity")
@@ -123,7 +135,9 @@ def server(configpath,path):
     server_identity.to_file(identitypath)
     
   
-  #serve_path = path
+  # Path with message storage. This is where you can change your location
+  # or where you want to begin to make a NomadNet by-message or 
+  # recursive message store.
   serve_path = configdir+"/storage/messages"
   server_destination = RNS.Destination(
       server_identity,
@@ -133,16 +147,20 @@ def server(configpath,path):
       "delivery"
   )
 
+  # Configure LXMRouter
   lxm_router = LXMF.LXMRouter(identity = server_identity, storagepath = configdir+"/lxmrouter")
   lxmf_destination = lxm_router.register_delivery_identity(server_identity,display_name=config.MAILUSER_NAME)
   lxm_router.register_delivery_callback(LXMReceived)
   lxmf_destination.announce()
   
+  # Initialize mailbox - Initial stage
   MB = POPR.Mailbox(serve_path)
   MB.server_lxmf_delivery = lxmf_destination
   MB.lxm_router = lxm_router
   
 
+  # Define callbacks for link and requests. 
+  # This is the core conrol logic.
   server_destination.set_link_established_callback(client_connected)
   #QUIT
   server_destination.register_request_handler("QUIT",response_generator = QUIT_CALLBACK,allow = RNS.Destination.ALLOW_ALL)
@@ -164,16 +182,19 @@ def server(configpath,path):
   #SEND
   server_destination.register_request_handler("SEND",response_generator = SEND_CALLBACK,allow = RNS.Destination.ALLOW_LIST,allowed_list = config.ALLOWED)
   
+  # Begin operational loop
   announceLoop(server_destination)
 
+# Main loop
 def announceLoop(destination):
     # Let the user know that everything is ready
-    RNS.log("File server "+RNS.prettyhexrep(destination.hash)+" running")
+    RNS.log("POPR server "+RNS.prettyhexrep(destination.hash)+" running")
     RNS.log("Hit enter to manually send an announce (Ctrl-C to quit)")
     global last_action_time, last_announce_time, MB, config, STATE
     while True:
       current_time = time.time()
-      if last_action_time:
+      # Check if the user has timed out
+      if last_action_time: # No user, no timeout
         if current_time > (last_action_time+config.SESSION_TIMEOUT):
           if MB:
             MB.link.teardown()
@@ -181,45 +202,50 @@ def announceLoop(destination):
           current_user = None
           STATE = POPR.IDLE
           last_action_time = None
+      # Check if we should announce
       if last_announce_time:
         if current_time > (last_announce_time+config.ANNOUNCE_RATE):
           last_announce_time = current_time
           destination.announce()
           RNS.log("Sent announce from "+RNS.prettyhexrep(destination.hash))
-      else:
+      else: # No last announce, so we should announce now.
         destination.announce()
         last_announce_time = current_time
         RNS.log("Sent announce from "+RNS.prettyhexrep(destination.hash))
-      time.sleep(5)
+      #Timeout/announce error <= 4 sec. Tradeoff for reducing cycles
+      time.sleep(5) 
     
-
+# When a link is established, set the callback for identification
+# Don't accept any other communication until identified
 def client_connected(link):
     RNS.log("Client connected")
     link.set_remote_identified_callback(remote_identified)
 
+# On disconnect - all steps are critical
 def client_disconnected(link):
     global STATE, MB
+    # Return to idle state
     STATE = POPR.IDLE
+    # Remove link from mailbox
     MB.link = None
     RNS.log("Client disconnected")
 
+# Callback for LXMF ingestion
 def LXMReceived(L):
   global serve_path
+  # Initialize a temporary mailbox to save the data
+  # regardless of current user state
   LetterBox = POPR.Mailbox(serve_path)
   LetterBox.Ingest(L)
 
 
 
-##REQUESTS
+# Request callbacks - The heart of the server logic
 
     #QUIT
 def QUIT_CALLBACK(path,data,request_id,link_id,remote_identity,requested_at):
-      # global STATE,current_user
-      # current_user = None
-      # STATE = POPR.IDLE
-      unlock_mailbox()
+      unlock_mailbox() 
       MB.QUIT()
-      #link_id.teardown()
       return None
       
 def STAT_CALLBACK(path,data,request_id,link_id,remote_identity,requested_at):
@@ -250,8 +276,6 @@ def RETR_CALLBACK(path,data,request_id,link_id,remote_identity,requested_at):
         return POPR.CTL.NEG
       if data:
         buffer = MB.RETR(int(data))
-        #send_lxm(MB.link,buffer)
-        #return CTL.POS
         return buffer
       else:
         return CTL.NEG
@@ -262,8 +286,6 @@ def DELE_CALLBACK(path,data,request_id,link_id,remote_identity,requested_at):
         return POPR.CTL.NEG
       if data and data > 0:
         buffer = MB.DELE(int(data))
-        #send_message(packet.link,POPR.CTL.POS)
-        #MB.DELE(COMMAND[0])
         return buffer
       else:
         return POPR.CTL.NEG
@@ -304,8 +326,11 @@ def SEND_CALLBACK(path,data,request_id,link_id,remote_identity,requested_at):
         return POPR.CTL.NEG
       return buffer
 
-##End REQURTSTS
 
+# Multi purpose function:
+# Ensures that the user making the request is the current user
+# of the mailbox and that the server is in the proper TRANSACTION
+# state, and then resets the timeout counter
 def verify_state(id):
   global current_user, STATE, last_action_time
   if id.hash != current_user:
@@ -315,46 +340,26 @@ def verify_state(id):
   last_action_time = time.time()
   return True
 
+# Returns server to idle state with no logged-in user
 def unlock_mailbox():
   global current_user, STATE
   STATE = POPR.IDLE
   current_user = None
-
-def send_lxm(link, message):
-  if message != POPR.CTL.NEG:
-    RNS.log(RNS.hexrep(message.lxm.hash))
-    try:
-      resource = RNS.Resource(message.lxm.packed_container(),link,callback=transfer_complete)
-      resource.filename = message.hash
-    except Exception as e:
-      RNS.log(e)
-      link.teardown()
-  else:
-    send_message(link,POPR.CTL.NEG)
-
-
-def transfer_complete(resource):
-    if resource.status == RNS.Resource.COMPLETE:
-      RNS.log("Done sending file to client")
-      send_message(resource.link,POPR.CTL.POS)
-    elif resource.status == RNS.Resource.FAILED:
-      RNS.log("Sending file to client failed")
-      send_message(resource.link,POPR.CTL.NEG)
   
     
-def pre_auth(receipt):
-    RNS.log("Waiting for identification.")
 
-    
+# Initializes server and mailbox on valid identification
 def remote_identified(link, identity):
     RNS.log("Remote identified as: "+RNS.hexrep(identity.hash,delimit=""))
     global MB, STATE, config, current_user, last_action_time
+    
+    # If the user is authorized:
     if identity.hash in config.ALLOWED:
-      if identity.hash == current_user:
+      if identity.hash == current_user: # Stuck session? Restart session w/o update
         RNS.log("Client already has an open session. Terminating.")
         MB.link.teardown()
         time.sleep(2)
-      elif current_user != None:
+      elif current_user != None: # Mailbox locked. Reject
         send_message(link, POPR.CTL.NEG+" MAILBOX LOCKED".encode("utf-8"))
         time.sleep(2)
         link.teardown()
@@ -366,6 +371,8 @@ def remote_identified(link, identity):
       MB.LoadAllFromDirectory()
       last_action_time = time.time()
       return
+      
+    # If the user is unauthotized, close the link.
     send_message(link, POPR.CTL.NEG+" YOU ARE NOT AUTHORIZED TO ACCESS THIS SYSTEM".encode("utf-8"))
     time.sleep(2)
     link.teardown()
@@ -378,17 +385,11 @@ def remote_identified(link, identity):
 #### General #############################################
 ##########################################################
 
+# Send bytes over link
 def send_message(link,data):
   data_packet = RNS.Packet(link, data)
   data_receipt = data_packet.send()
   
-def send_command(link, CMD, DTA, ResponseCallback, FailedCallback):
-  link.request(
-    CMD,
-    DTA,
-    ResponseCallback,
-    FailedCallback
-  )
 
 ##########################################################
 #### Program Startup #####################################

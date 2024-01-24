@@ -1,7 +1,7 @@
 ##########################################################
 # Post Office Protocol, Reticulum test implementation    #
 #                                                        #
-# Server implementation for POPR. Designed to            #
+# Client implementation for POPR. Designed to            #
 # specification to show how the POPR module is meant     #
 # to be used.                                            #
 #                                                        #
@@ -13,6 +13,8 @@
 #                                                        #
 # This owes heavily to the RNS Resource example, and is  #
 # licensed under a similar MIT licence.                  #
+#                                                        #
+# This code has not been cleaned or refactored. Sorry    #
 ##########################################################
 
 import os
@@ -42,26 +44,9 @@ APP_NAME = "popr"
     #TOP
     #UIDL
 
-##########################################################
-#### Client Part #########################################
-##########################################################
-
-# We store a global list of files available on the server
-#server_files      = []
 
 # A reference to the server link
 server_link       = None
-
-# And a reference to the current download
-current_download  = None
-current_filename  = None
-
-# Variables to store download statistics
-download_started  = 0
-download_finished = 0
-download_time     = 0
-transfer_size     = 0
-file_size         = 0
 
 client_identity = None
 should_quit = False
@@ -88,11 +73,11 @@ def client(destination_hexhash, configpath):
     reticulum = RNS.Reticulum(configpath)
     global client_identity
     
+    # Load/create identity
     userdir = os.path.expanduser("~")
     configdir = userdir+"/.poprtestclient"
     identitypath = configdir+"/storage/identity"
-    os.makedirs(configdir+"/storage",exist_ok=True)
-    #os.makedirs(configdir+"/lxmrouter",exist_ok=True)
+    os.makedirs(configdir+"/storage",exist_ok=True) #Fails gracefully if dir exists
     if os.path.exists(identitypath):
       client_identity = RNS.Identity.from_file(identitypath)
       print("Loading identity")
@@ -101,9 +86,6 @@ def client(destination_hexhash, configpath):
       client_identity = RNS.Identity()
       client_identity.to_file(identitypath)
     
-    
-    #client_identity = RNS.Identity()
-
 
     # Check if we know a path to the destination
     if not RNS.Transport.has_path(destination_hash):
@@ -128,13 +110,16 @@ def client(destination_hexhash, configpath):
     )
 
     # We also want to automatically prove incoming packets
+    # This may not actually be required for POPR - Legacy code
     server_destination.set_proof_strategy(RNS.Destination.PROVE_ALL)
+    
+    # Link callback setup
     link = RNS.Link(server_destination)
     link.set_packet_callback(response_received)
     link.set_link_established_callback(link_established)
     link.set_link_closed_callback(link_closed)
 
-
+    # Core loop
     print("WAITING")
     global should_quit
     try:
@@ -143,15 +128,19 @@ def client(destination_hexhash, configpath):
     except:
       pass
     finally:
+      # This probably needs error handling for link == None
       link.teardown()
 
 
-        
+# Callback to only accept input when in a ready state
 def Ready():
   print("READY")
   Command = input()
   HandleInput(Command)
   
+# Parses string input for testing purposes. For Machine to Machine
+# communicatins, this should be replaced with whatever the UI demands,
+# calling the requests directly or through a wrapper like send_command
 def HandleInput(CMD):
     command = CMD.split(" ")
     command[0] = command[0].upper()
@@ -235,14 +224,15 @@ def HandleInput(CMD):
       Ready()
         
         
+# Callback when a response is received. Simply prints the human-readable
+# packet data and sets the input back to ready.
 def response_received(content, packet):
     try:
       print(content.decode("utf-8"))
       Ready()
-#      menu()
     except:
       pass
-#    packet.link.teardown()
+
 
 # This function is called when a link
 # has been established with the server
@@ -268,18 +258,21 @@ def link_closed(link):
     os._exit(0)
 
 
-    
+# Callback when a response is received. Simply prints the human-readable
+# packet data and sets the input back to ready.
 def RequestResponse(receipt):
   print(str(receipt.response.decode("utf-8")))
   Ready()
   
+  
+# Callback to handle the results of RETR request. It attempts to decode the
+# LXMessage and save it. If the decode fails, it prints the response.
 def RetrieveResponse(receipt):
   L = msgpack.unpackb(receipt.response)
   try:
     L = LXMessage.unpack_from_bytes(L['lxmf_bytes'])
   except:
     pass
-  #print(type(L))
   if type(L) is LXMF.LXMessage:
         filehash = RNS.hexrep(L.hash,delimit = "")
         RNS.log(filehash)
@@ -296,17 +289,20 @@ def RetrieveResponse(receipt):
 
 def RequestFailed(receipt):
   RNS.log("Request failed.")
-  #server_link.teardown()
+
  
   
 ##########################################################
 #### General #############################################
 ##########################################################
 
+# Send a packet of data over the link
 def send_message(link,data):
   data_packet = RNS.Packet(link, data)
   data_receipt = data_packet.send()
   
+# Send a request over the link. Why not just call directly?
+# Blame old me, I don't know.
 def send_command(link, CMD, DTA, ResponseCallback, FailedCallback):
   link.request(
     CMD,

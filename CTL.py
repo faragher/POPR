@@ -1,3 +1,8 @@
+### POPR control codes
+# Currently arbitraty, and only POS/NEG in use.
+# Remainder legacy code from initial POP3 byte-
+# only communication setup.
+
 POS = "\x2b\x4f\x4b".encode("utf-8")
 NEG = "\x2d\x45\x52\x52".encode("utf-8")
 CRLF = "\x0d\x0a".encode("utf-8")
